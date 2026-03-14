@@ -1,0 +1,11 @@
+services:
+  logguard:
+    build: .
+    ports:
+      - "80:80"        # Apache
+      - "8501:8501"    # Streamlit
+    volumes:
+      - ./logs:/var/log/apache2
+      - /var/log/syslog:/var/log/host_syslog:ro
+      - /var/log/auth.log:/var/log/host_auth:ro
+    restart: always
