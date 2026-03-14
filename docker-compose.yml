@@ -2,11 +2,14 @@ services:
   logguard:
     build: .
     ports:
-      - "8501:8501"    # Streamlit UI
-      - "5000:5000"    # Flask backend (internal use only - remove from prod)
-    restart: always
+      - "8501:8501"
+    volumes:
+      - logdata:/app
+    restart: unless-stopped
     environment:
-      # Optional: pre-set these so the user doesn't have to type them in the UI
-      # LOGGUARD_API_KEY: "sk-ant-..."
-      # LOGGUARD_VM_HOST: "192.168.1.50"
-      - PYTHONUNBUFFERED=1
+      - BACKEND_URL=http://localhost:5000
+      - OPENAI_API_KEY=${OPENAI_API_KEY}        # <-- replace this
+      - OPENAI_MODEL=gpt-4.1                    # or gpt-3.5-turbo
+
+volumes:
+  logdata:
