@@ -2,10 +2,11 @@ services:
   logguard:
     build: .
     ports:
-      - "80:80"        # Apache
-      - "8501:8501"    # Streamlit
-    volumes:
-      - ./logs:/var/log/apache2
-      - /var/log/syslog:/var/log/host_syslog:ro
-      - /var/log/auth.log:/var/log/host_auth:ro
+      - "8501:8501"    # Streamlit UI
+      - "5000:5000"    # Flask backend (internal use only - remove from prod)
     restart: always
+    environment:
+      # Optional: pre-set these so the user doesn't have to type them in the UI
+      # LOGGUARD_API_KEY: "sk-ant-..."
+      # LOGGUARD_VM_HOST: "192.168.1.50"
+      - PYTHONUNBUFFERED=1
