@@ -1,4 +1,5 @@
 #!/bin/bash
+#mporw na grapsw
 
 # 1. Υπηρεσίες Ubuntu
 service rsyslog start
