@@ -1,7 +1,5 @@
 """
-app.py  —  LogGuard AI  (Streamlit front-end)
-Uses OpenAI API for log analysis.
-API key is hardcoded via OPENAI_API_KEY env var (set in docker-compose.yml).
+app.py  —  LogGuard AI
 """
 
 import streamlit as st
@@ -21,41 +19,18 @@ st.set_page_config(
 
 BACKEND      = os.getenv("BACKEND_URL", "http://localhost:5000")
 OPENAI_API   = "https://api.openai.com/v1/chat/completions"
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
-OPENAI_KEY   = os.getenv("OPENAI_API_KEY", "")
+OPENAI_MODEL = "gpt-4o"
 
-# ── Session state defaults ─────────────────────────────────────────────────────
 for k, v in {
     "session_id":    str(uuid.uuid4()),
     "connected":     False,
     "conn_status":   "disconnected",
     "chat_messages": [],
-    "active_tab":    "live",
+    "refresh_count": 0,
+    "last_log_hash": "",
 }.items():
     if k not in st.session_state:
         st.session_state[k] = v
-
-# ── Severity classification ────────────────────────────────────────────────────
-_RULES = [
-    ("critical", re.compile(
-        r"(failed password|invalid user|authentication failure"
-        r"|ufw block|reject|drop|exploit|brute.?force|root login"
-        r"|intrusion|attack|malware)", re.I)),
-    ("warning", re.compile(
-        r"(sudo|permission denied|connection refused|timeout"
-        r"|rate.?limit|disk.?full|oom|certificate)", re.I)),
-    ("info", re.compile(
-        r"(started|stopped|accepted|connected|opened|closed)", re.I)),
-]
-_BADGE = {"critical": "🔴", "warning": "🟡", "info": "🔵", "normal": "⚪"}
-_COLOR = {"critical": "#ff4b4b", "warning": "#ffa600", "info": "#4da6ff", "normal": "#b0b0b0"}
-
-
-def classify(line: str) -> str:
-    for lvl, pat in _RULES:
-        if pat.search(line):
-            return lvl
-    return "normal"
 
 
 # ── Backend helpers ────────────────────────────────────────────────────────────
@@ -83,8 +58,9 @@ def poll_status() -> str:
 def do_connect(host, port, user, pwd) -> tuple[bool, str]:
     try:
         r = requests.post(f"{BACKEND}/connect", json={
-            "host": host, "port": int(port), "username": user,
-            "password": pwd, "session_id": st.session_state.session_id,
+            "host": host, "port": int(port),
+            "username": user, "password": pwd,
+            "session_id": st.session_state.session_id,
         }, timeout=8)
         if r.ok and r.json().get("status") == "ok":
             return True, ""
@@ -104,20 +80,17 @@ def do_disconnect():
     st.session_state.conn_status = "disconnected"
 
 
-def call_openai(system: str, messages: list) -> str:
-    if not OPENAI_KEY:
-        raise ValueError("OPENAI_API_KEY is not set in environment.")
-    payload = {
-        "model": OPENAI_MODEL,
-        "messages": [{"role": "system", "content": system}] + messages,
-        "max_tokens": 1024,
-        "temperature": 0.2,
-    }
+def call_openai(api_key: str, system: str, messages: list) -> str:
     r = requests.post(
         OPENAI_API,
-        headers={"Authorization": f"Bearer {OPENAI_KEY}",
+        headers={"Authorization": f"Bearer {api_key}",
                  "Content-Type": "application/json"},
-        json=payload,
+        json={
+            "model": OPENAI_MODEL,
+            "messages": [{"role": "system", "content": system}] + messages,
+            "max_tokens": 1024,
+            "temperature": 0.2,
+        },
         timeout=30,
     )
     r.raise_for_status()
@@ -134,7 +107,6 @@ with st.sidebar:
     vm_port = st.number_input("SSH Port", value=22, min_value=1, max_value=65535)
     vm_user = st.text_input("Username",   placeholder="ubuntu")
     vm_pass = st.text_input("Password",   type="password")
-
     st.divider()
 
     if not st.session_state.connected:
@@ -155,25 +127,18 @@ with st.sidebar:
         st.session_state.conn_status = live
         badge = {"connected": "🟢", "connecting": "🟡"}.get(live, "🔴")
         st.markdown(f"**Status:** {badge} `{live}`")
-
         if live == "auth_error":
-            st.error("Authentication failed. Check username/password.")
-
+            st.error("Authentication failed. Check credentials.")
         if st.button("⏏ Disconnect", use_container_width=True):
             do_disconnect()
             st.rerun()
 
     st.divider()
-    if not OPENAI_KEY:
-        st.warning("⚠️ OPENAI_API_KEY not set.\nSet it in docker-compose.yml.")
-    else:
-        st.success("✅ OpenAI API key loaded.")
-    st.caption("Logs stream automatically after connecting.")
+    st.caption("LogGuard AI — SSH log streaming")
 
 
 # ── Tabs ───────────────────────────────────────────────────────────────────────
-tab_live, tab_chat, tab_about = st.tabs(
-    ["📡 Live Logs", "🤖 AI Analysis", "ℹ️ How it works"])
+tab_live, tab_chat = st.tabs(["📡 Live Logs", "🤖 AI Analysis"])
 
 
 # ════════════════════════════ TAB 1 — LIVE LOGS ═══════════════════════════════
@@ -183,212 +148,204 @@ with tab_live:
         st.info("👈 Enter your VM credentials in the sidebar and click **Connect**.")
 
     else:
-        # Status warning if not yet fully connected
         status = st.session_state.conn_status
-        if status == "connecting":
-            st.warning("⏳ SSH connection in progress… logs will appear shortly.")
-        elif status not in ("connected",):
+        now_str = datetime.now().strftime("%H:%M:%S")
+
+        # ── Live indicator ─────────────────────────────────────────────────────
+        if status == "connected":
+            st.html(f"""
+<style>
+@keyframes pulse {{
+  0%,100% {{ opacity:1; transform:scale(1); }}
+  50%      {{ opacity:0.35; transform:scale(0.8); }}
+}}
+</style>
+<div style="display:flex;align-items:center;gap:10px;
+            background:#0e1117;border:1px solid #1a3a1a;
+            border-radius:8px;padding:8px 14px;margin-bottom:8px;">
+  <div style="width:10px;height:10px;border-radius:50%;background:#00e676;
+              flex-shrink:0;animation:pulse 1.4s ease-in-out infinite;"></div>
+  <span style="color:#00e676;font-size:13px;font-weight:600;
+               font-family:monospace;">LIVE</span>
+  <span style="color:#555;font-size:12px;font-family:monospace;">
+    last update: {now_str} &nbsp;·&nbsp; refresh #{st.session_state.refresh_count}
+  </span>
+</div>
+""")
+        elif status == "connecting":
+            st.warning("⏳ SSH connecting… logs will appear shortly.")
+        else:
             st.error(f"SSH status: `{status}`")
 
+        # ── Fetch logs ─────────────────────────────────────────────────────────
         logs_raw = fetch_logs(300)
 
-        # Metrics
-        counts = {"critical": 0, "warning": 0, "info": 0, "normal": 0}
-        for ln in logs_raw:
-            counts[classify(ln)] += 1
+        new_hash = str(len(logs_raw)) + (logs_raw[-1] if logs_raw else "")
+        st.session_state.last_log_hash = new_hash
 
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Total events", len(logs_raw))
-        c2.metric("🔴 Threats",   counts["critical"])
-        c3.metric("🟡 Warnings",  counts["warning"])
-        c4.metric("🔵 Info",      counts["info"])
-        st.divider()
+        # ── Search filter only — no severity, no colors ────────────────────────
+        search = st.text_input(
+            "Filter logs",
+            placeholder="Type to filter… e.g. sshd, 192.168, sudo",
+            label_visibility="visible")
 
-        # Filters
-        fc1, fc2 = st.columns([3, 1])
-        with fc1:
-            search = st.text_input(
-                "Filter", placeholder="e.g. sshd  192.168  sudo",
-                label_visibility="collapsed")
-        with fc2:
-            levels = st.multiselect(
-                "Levels",
-                ["🔴 critical", "🟡 warning", "🔵 info", "⚪ normal"],
-                default=["🔴 critical", "🟡 warning", "🔵 info", "⚪ normal"],
-                label_visibility="collapsed")
-        selected = {lbl.split()[1] for lbl in levels}
+        filtered = [
+            ln for ln in logs_raw
+            if not search or search.lower() in ln.lower()
+        ]
 
-        # Build log rows
-        rows = []
-        for ln in logs_raw:
-            lvl = classify(ln)
-            if lvl not in selected:
-                continue
-            if search and search.lower() not in ln.lower():
-                continue
+        # ── Plain terminal window ──────────────────────────────────────────────
+        rows_html = []
+        for ln in filtered[-150:]:
             safe = (ln.replace("&", "&amp;")
                       .replace("<", "&lt;")
                       .replace(">", "&gt;"))
-            rows.append(
+            rows_html.append(
                 f'<div style="font-family:monospace;font-size:12px;'
-                f'padding:2px 6px;color:{_COLOR[lvl]}">'
-                f'{_BADGE[lvl]}&nbsp;{safe}</div>'
+                f'padding:1px 4px;color:#c8c8c8;">{safe}</div>'
             )
 
-        body = "".join(rows[-150:]) if rows else (
-            '<div style="color:#555;font-size:12px;padding:8px;">'
-            + ("No logs yet — waiting for SSH stream…"
-               if not logs_raw else "No lines match your filters.")
-            + "</div>"
+        empty_msg = (
+            "No logs yet — waiting for SSH stream…"
+            if not logs_raw
+            else "No lines match your filter."
+        )
+        body = "".join(rows_html) if rows_html else (
+            f'<div style="color:#555;font-size:12px;padding:8px;">{empty_msg}</div>'
         )
 
         st.html(
             '<div style="background:#0e1117;border-radius:8px;padding:12px;'
-            'height:420px;overflow-y:auto;border:1px solid #2a2a2a;">'
+            'height:480px;overflow-y:auto;border:1px solid #2a2a2a;">'
             + body
-            + '<div id="logbottom"></div></div>'
-            + '<script>'
-            + 'var b=document.getElementById("logbottom");'
-            + 'if(b)b.scrollIntoView();'
-            + '</script>'
+            + '<div id="lb"></div></div>'
+            + '<script>document.getElementById("lb")?.scrollIntoView({behavior:"smooth"});</script>'
         )
 
-        # Refresh controls — NO sleep() here, use a form-based trigger instead
-        rcol1, rcol2, rcol3 = st.columns([1, 1, 3])
-        with rcol1:
-            if st.button("🔄 Refresh now"):
+        # ── Refresh controls ───────────────────────────────────────────────────
+        rc1, rc2, rc3 = st.columns([1, 1, 4])
+        with rc1:
+            if st.button("🔄 Refresh"):
+                st.session_state.refresh_count += 1
                 st.rerun()
-        with rcol2:
-            auto = st.toggle("Auto (5 s)", value=False,
-                             help="Enables 5-second auto-refresh. "
-                                  "Turn off when using AI Analysis tab.")
-        with rcol3:
-            st.caption(
-                f"{len(rows)} shown · {len(logs_raw)} total · "
-                f"{datetime.now().strftime('%H:%M:%S')}"
-            )
+        with rc2:
+            auto = st.toggle("Auto (4 s)", value=False,
+                             help="Turn OFF when typing in the AI tab.")
+        with rc3:
+            st.caption(f"{len(filtered)} lines shown · {len(logs_raw)} total")
 
         if auto:
-            time.sleep(5)
+            time.sleep(4)
+            st.session_state.refresh_count += 1
             st.rerun()
 
 
 # ════════════════════════════ TAB 2 — AI ANALYSIS ════════════════════════════
 with tab_chat:
+
     SYSTEM = (
-        "You are a senior security analyst. Analyze Linux VM and firewall logs. "
-        "Identify threats, brute-force patterns, privilege escalations, and anomalies. "
-        "Be concise. Use bullet points. Quote the exact log fragment that triggered each finding. "
-        "If nothing suspicious is found, say so clearly."
+        "You are a senior security analyst. You will be given Linux system logs "
+        "from a VM or firewall. Analyze them carefully and tell the user if there "
+        "is anything they should be concerned about — threats, brute-force attempts, "
+        "privilege escalations, unusual connections, or any other anomalies. "
+        "Be concise. Use bullet points. Quote the exact log line for each finding. "
+        "If everything looks normal, say so clearly."
     )
 
-    if not OPENAI_KEY:
-        st.error("OPENAI_API_KEY is not configured. Set it in docker-compose.yml and rebuild.")
-    else:
-        # Quick-analyze button
-        if st.session_state.connected:
-            if st.button("⚡ Analyze last 100 log lines", type="primary"):
-                lines = fetch_logs(100)
+    # API key input — stored in session so user only types it once per session
+    if "openai_key" not in st.session_state:
+        st.session_state.openai_key = ""
+
+    key_input = st.text_input(
+        "OpenAI API Key",
+        type="password",
+        placeholder="sk-…  (required to use AI analysis)",
+        value=st.session_state.openai_key,
+    )
+    if key_input:
+        st.session_state.openai_key = key_input
+
+    api_key = st.session_state.openai_key
+
+    st.divider()
+
+    # ── Send current logs to AI ────────────────────────────────────────────────
+    if st.session_state.connected:
+        sc1, sc2 = st.columns([1, 3])
+        with sc1:
+            n_lines = st.selectbox("Lines to send", [50, 100, 200], index=1,
+                                   label_visibility="collapsed")
+        with sc2:
+            if st.button(f"⚡ Analyze last {n_lines} log lines", type="primary",
+                         disabled=not api_key):
+                lines = fetch_logs(n_lines)
                 if not lines:
                     st.warning("No logs available yet.")
                 else:
-                    with st.spinner("Analyzing with OpenAI…"):
+                    with st.spinner("Analyzing…"):
                         try:
-                            ans = call_openai(SYSTEM, [{
+                            ans = call_openai(api_key, SYSTEM, [{
                                 "role": "user",
                                 "content": (
-                                    "Analyze these system logs for security threats:\n"
+                                    f"Here are the last {n_lines} log lines. "
+                                    f"Is there anything I should be concerned about?\n"
                                     f"```\n{chr(10).join(lines)}\n```"
                                 ),
                             }])
                             st.session_state.chat_messages.append(
                                 {"role": "assistant", "content": ans})
                         except Exception as e:
-                            st.error(f"OpenAI API error: {e}")
+                            st.error(f"OpenAI error: {e}")
+    else:
+        st.info("Connect to a VM first, then you can send logs for analysis.")
+
+    st.divider()
+
+    # ── Chat history ───────────────────────────────────────────────────────────
+    for msg in st.session_state.chat_messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    # ── Chat input ─────────────────────────────────────────────────────────────
+    if prompt := st.chat_input(
+        "Ask anything… e.g. 'Are there failed SSH logins?'",
+        disabled=not api_key,
+    ):
+        st.session_state.chat_messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
+
+        # First turn: attach log context automatically
+        first_turn = sum(
+            1 for m in st.session_state.chat_messages if m["role"] == "user"
+        ) == 1
+
+        if first_turn and st.session_state.connected:
+            lines = fetch_logs(80)
+            msgs_to_send = [{
+                "role": "user",
+                "content": (
+                    f"Current logs for context:\n```\n{chr(10).join(lines)}\n```\n\n"
+                    f"Question: {prompt}"
+                ),
+            }]
         else:
-            st.info("Connect to a VM first to enable auto-analysis.")
+            msgs_to_send = [
+                m for m in st.session_state.chat_messages
+                if m["role"] in ("user", "assistant")
+            ]
 
-        st.divider()
+        with st.chat_message("assistant"):
+            with st.spinner("Thinking…"):
+                try:
+                    reply = call_openai(api_key, SYSTEM, msgs_to_send)
+                    st.markdown(reply)
+                    st.session_state.chat_messages.append(
+                        {"role": "assistant", "content": reply})
+                except Exception as e:
+                    st.error(f"OpenAI API error: {e}")
 
-        # Chat history
-        for msg in st.session_state.chat_messages:
-            with st.chat_message(msg["role"]):
-                st.markdown(msg["content"])
-
-        # Chat input
-        if prompt := st.chat_input("Ask about your logs or describe a threat…"):
-            st.session_state.chat_messages.append({"role": "user", "content": prompt})
-            with st.chat_message("user"):
-                st.markdown(prompt)
-
-            # On first user message, inject log context automatically
-            first_turn = sum(1 for m in st.session_state.chat_messages
-                             if m["role"] == "user") == 1
-            if first_turn and st.session_state.connected:
-                lines = fetch_logs(80)
-                msgs_to_send = [{
-                    "role": "user",
-                    "content": (
-                        f"Current logs for context:\n```\n{chr(10).join(lines)}\n```\n\n"
-                        f"Question: {prompt}"
-                    ),
-                }]
-            else:
-                msgs_to_send = [
-                    m for m in st.session_state.chat_messages
-                    if m["role"] in ("user", "assistant")
-                ]
-
-            with st.chat_message("assistant"):
-                with st.spinner("Thinking…"):
-                    try:
-                        reply = call_openai(SYSTEM, msgs_to_send)
-                        st.markdown(reply)
-                        st.session_state.chat_messages.append(
-                            {"role": "assistant", "content": reply})
-                    except Exception as e:
-                        st.error(f"OpenAI API error: {e}")
-
-
-# ════════════════════════════ TAB 3 — HOW IT WORKS ════════════════════════════
-with tab_about:
-    st.markdown("""
-## How LogGuard AI works
-
-### Architecture
-
-```
-Your VM / Firewall
-  /var/log/auth.log
-  /var/log/syslog
-        │  SSH (paramiko — runs inside Docker)
-        ▼
- ┌──────────────────────────────┐
- │   Docker container           │
- │   Flask  :5000  (internal)   │  ← SSH tail → shared_logs.log
- │   Streamlit :8501            │  ← reads logs, calls OpenAI API
- └──────────────────────────────┘
-        │  HTTPS
-        ▼
-   OpenAI API  (key set in docker-compose.yml)
-```
-
-### Setup
-
-```bash
-# 1. Add your OpenAI key to docker-compose.yml (OPENAI_API_KEY)
-# 2. Run:
-docker compose up --build
-# 3. Open http://localhost:8501
-# 4. Enter your VM's SSH credentials and click Connect
-```
-
-### Monitored log files
-- `/var/log/auth.log` — SSH logins, sudo, PAM events
-- `/var/log/syslog`   — kernel, firewall (UFW), service events
-
-### Requirements on the monitored VM
-- SSH must be enabled
-- The user account needs read access to the log files:
-  `sudo usermod -aG adm <username>`
-""")
+    if st.session_state.chat_messages:
+        if st.button("🗑️ Clear chat"):
+            st.session_state.chat_messages = []
+            st.rerun()
