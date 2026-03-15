@@ -4,10 +4,5 @@ services:
     ports:
       - "8501:8501"
     volumes:
-      - logdata:/app
+      - /var/log:/data_to_monitor:ro
     restart: unless-stopped
-    environment:
-      - BACKEND_URL=http://localhost:5000
-
-volumes:
-  logdata:
